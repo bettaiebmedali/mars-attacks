@@ -679,18 +679,326 @@ La variable est maintenant gérée proprement par la configuration Ansible et no
 
 ---
 
-## Partie 10 — Collecte des informations système
+# Partie 10 — Collecte des informations système avec Ansible Facts
+
+## Objectif
+
+Ansible possède un mécanisme appelé **Facts** qui permet de récupérer automatiquement des informations sur les machines cibles avant l'exécution des tâches.
+
+Ces informations sont collectées grâce au module Ansible :
+
+```text
+setup
+```
+
+Le module `setup` interroge la machine distante et retourne un ensemble d'informations système sous forme de variables appelées :
+
+```
+ansible_facts
+```
+
+Ces variables peuvent ensuite être utilisées dans les playbooks.
+
+---
+
+# 10.1 Exécution du module setup
+
+Lancer la commande :
 
 ```bash
 docker exec ansible-controller ansible mars_servers -i inventory.ini -m setup
 ```
 
+Décomposition de la commande :
+
+| Élément | Signification |
+|---|---|
+| `docker exec ansible-controller` | Exécute la commande dans le conteneur Ansible |
+| `ansible` | Lance une commande Ansible ad-hoc |
+| `mars_servers` | Groupe de machines défini dans l'inventaire |
+| `-i inventory.ini` | Utilise cet inventaire |
+| `-m setup` | Utilise le module `setup` pour collecter les informations système |
+
+---
+
+# 10.2 Exemple d'inventaire
+
+Exemple :
+
+```ini
+[mars_servers]
+mars-web
+```
+
+Le groupe :
+
+```
+mars_servers
+```
+
+indique à Ansible quelles machines doivent être interrogées.
+
+---
+
+# 10.3 Fonctionnement interne
+
+Lors de l'exécution :
+
+```bash
+ansible mars_servers -m setup
+```
+
+Ansible réalise plusieurs étapes :
+
+1. Connexion à la machine distante.
+2. Exécution du module Python `setup`.
+3. Collecte des informations système.
+4. Retour des résultats au contrôleur Ansible.
+
+Le résultat est retourné sous forme JSON.
+
+---
+
+# 10.4 Informations récupérées
+
+Le module `setup` récupère plusieurs catégories d'informations.
+
+## Processeur (CPU)
+
+Exemple :
+
+```json
+"ansible_processor": [
+    "0",
+    "Genuine Intel(R) CPU"
+]
+```
+
+Permet de connaître :
+
+- le type de processeur ;
+- l'architecture ;
+- le nombre de CPU.
+
+Variable principale :
+
+```yaml
+ansible_processor
+```
+
+---
+
+## Mémoire RAM
+
+Exemple :
+
+```json
+"ansible_memtotal_mb": 4096
+```
+
+Cette variable indique la mémoire totale disponible en Mo.
+
+Variable :
+
+```yaml
+ansible_memtotal_mb
+```
+
+Exemple d'utilisation :
+
+```yaml
+- debug:
+    msg: "RAM disponible : {{ ansible_memtotal_mb }} MB"
+```
+
+Résultat :
+
+```
+RAM disponible : 4096 MB
+```
+
+---
+
+## Système d'exploitation
+
+Exemple :
+
+```json
+"ansible_distribution": "Ubuntu"
+```
+
+Informations disponibles :
+
+```yaml
+ansible_distribution
+ansible_distribution_version
+ansible_os_family
+```
+
+Exemple :
+
+```yaml
+- debug:
+    msg: "OS : {{ ansible_distribution }} {{ ansible_distribution_version }}"
+```
+
+Résultat :
+
+```
+OS : Ubuntu 22.04
+```
+
+---
+
+## Réseau
+
+Exemple :
+
+```json
+"ansible_default_ipv4": {
+    "address": "172.18.0.2",
+    "interface": "eth0"
+}
+```
+
 Informations récupérées :
-- CPU
-- RAM
-- OS
-- réseau
-- hostname
+
+- adresse IP ;
+- interface réseau ;
+- passerelle ;
+- MAC address.
+
+Variables :
+
+```yaml
+ansible_default_ipv4.address
+ansible_interfaces
+```
+
+Exemple :
+
+```yaml
+- debug:
+    msg: "IP : {{ ansible_default_ipv4.address }}"
+```
+
+---
+
+## Nom de machine (hostname)
+
+Exemple :
+
+```json
+"ansible_hostname": "mars-web"
+```
+
+Variable :
+
+```yaml
+ansible_hostname
+```
+
+Utilisation dans un template :
+
+```jinja2
+Server : {{ ansible_hostname }}
+```
+
+Résultat :
+
+```
+Server : mars-web
+```
+
+---
+
+# 10.5 Exemple de sortie
+
+La sortie contient une structure similaire :
+
+```json
+{
+    "ansible_facts": {
+        "ansible_hostname": "mars-web",
+        "ansible_distribution": "Ubuntu",
+        "ansible_memtotal_mb": 4096,
+        "ansible_processor": [
+            "Intel CPU"
+        ]
+    }
+}
+```
+
+La clé importante est :
+
+```text
+ansible_facts
+```
+
+Elle contient toutes les variables collectées automatiquement.
+
+---
+
+# 10.6 Utilisation dans un playbook
+
+Les Facts sont automatiquement disponibles dans les playbooks.
+
+Exemple :
+
+```yaml
+- name: Display system information
+  hosts: mars_servers
+
+  tasks:
+
+  - name: Show hostname
+    debug:
+      msg: "Machine : {{ ansible_hostname }}"
+
+  - name: Show operating system
+    debug:
+      msg: "OS : {{ ansible_distribution }}"
+
+  - name: Show RAM
+    debug:
+      msg: "RAM : {{ ansible_memtotal_mb }} MB"
+```
+
+Résultat :
+
+```
+Machine : mars-web
+OS : Ubuntu
+RAM : 4096 MB
+```
+
+---
+
+# 10.7 Vérification
+
+La sortie de la commande :
+
+```bash
+docker exec ansible-controller ansible mars_servers -i inventory.ini -m setup
+```
+
+doit contenir :
+
+```
+"ansible_facts"
+```
+
+avec notamment :
+
+```
+ansible_processor
+ansible_memtotal_mb
+ansible_distribution
+ansible_hostname
+ansible_default_ipv4
+```
+
+Les Facts permettent donc à Ansible d'adapter automatiquement les déploiements selon l'environnement réel de chaque serveur.
 
 **✅ Vérification** : la sortie JSON doit contenir une clé `"ansible_facts"` avec, entre autres, `ansible_processor`, `ansible_memtotal_mb`, `ansible_distribution`.
 
