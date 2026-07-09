@@ -449,20 +449,231 @@ Vous devez voir le HTML `Welcome to Mars Colony`. Dans un vrai Codespace, vous p
 
 ---
 
-## Partie 9 — Variables Ansible
+# Partie 9 — Variables Ansible
 
-Créez **`mission-mars/group_vars/all.yml`** :
+## Objectif
+
+Dans cette partie, nous allons externaliser la variable `mission` dans un fichier `group_vars` afin de comprendre le fonctionnement des variables Ansible.
+
+---
+
+## 9.1 Suppression de la variable `mission` dans le playbook
+
+Lors de la partie précédente, pour résoudre l'erreur :
+
+```
+AnsibleUndefinedVariable: 'mission' is undefined
+```
+
+nous avons pu ajouter temporairement une variable directement dans le playbook :
+
+```yaml
+vars:
+  mission: "Mission Mars 2030"
+```
+
+Avant de commencer cette partie, cette variable doit être supprimée.
+
+Pourquoi ?
+
+Parce que l'objectif est maintenant d'utiliser les variables globales Ansible avec `group_vars`.
+
+Si la variable reste dans le playbook :
+
+```yaml
+vars:
+  mission: "Mission Mars 2030"
+```
+
+elle sera prioritaire et Ansible utilisera cette valeur au lieu de celle définie dans :
+
+```
+group_vars/all.yml
+```
+
+---
+
+## 9.2 Ordre de priorité des variables Ansible
+
+Ansible possède un mécanisme de priorité des variables.
+
+Une même variable peut être définie à plusieurs endroits :
+
+- ligne de commande ;
+- playbook ;
+- inventaire ;
+- host_vars ;
+- group_vars ;
+- rôles.
+
+Lorsque plusieurs valeurs existent pour une même variable, Ansible utilise celle qui possède la priorité la plus élevée.
+
+Ordre simplifié du plus prioritaire au moins prioritaire :
+
+| Priorité | Source | Exemple |
+|---|---|---|
+| 1 | Variables extra (`-e`) | `ansible-playbook deploy.yml -e "mission=Test"` |
+| 2 | Variables définies dans le playbook | `vars:` dans `deploy_web.yml` |
+| 3 | Variables au niveau d'une tâche | `vars:` dans une task |
+| 4 | Variables d'hôte (`host_vars`) | `host_vars/mars-web.yml` |
+| 5 | Variables de groupe (`group_vars`) | `group_vars/all.yml` |
+| 6 | Variables par défaut d'un rôle | `roles/nginx/defaults/main.yml` |
+
+Exemple :
+
+Dans `deploy_web.yml` :
+
+```yaml
+vars:
+  mission: "Mission Mars 2030"
+```
+
+Dans `group_vars/all.yml` :
+
+```yaml
+mission: "Mars Exploration 2035"
+```
+
+Résultat :
+
+```
+Mission Mars 2030
+```
+
+La valeur du playbook gagne car elle possède une priorité supérieure.
+
+C'est pourquoi il faut supprimer la variable `mission` du playbook avant de continuer.
+
+---
+
+## 9.3 Création du fichier `group_vars/all.yml`
+
+Créer le dossier :
+
+```bash
+mkdir group_vars
+```
+
+Créer le fichier :
+
+```bash
+touch group_vars/all.yml
+```
+
+Structure finale :
+
+```
+mission-mars/
+├── inventory.ini
+├── deploy_web.yml
+├── templates/
+│   └── index.html.j2
+└── group_vars/
+    └── all.yml
+```
+
+---
+
+## 9.4 Définition de la variable globale
+
+Modifier le fichier :
+
+```
+group_vars/all.yml
+```
+
+avec :
 
 ```yaml
 mission: Mars Exploration 2035
 ```
 
-Relancez le déploiement web pour voir la variable injectée dans la page :
+Ansible charge automatiquement ce fichier.
+
+Aucun changement n'est nécessaire dans le playbook.
+
+---
+
+## 9.5 Utilisation dans le template Jinja2
+
+Le fichier :
+
+```
+templates/index.html.j2
+```
+
+contient :
+
+```jinja2
+<h1>🚀 Welcome to Mars Colony</h1>
+
+<p>
+Server : {{ ansible_hostname }}
+</p>
+
+<p>
+Mission : {{ mission }}
+</p>
+```
+
+La variable :
+
+```jinja2
+{{ mission }}
+```
+
+sera remplacée automatiquement par la valeur définie dans :
+
+```
+group_vars/all.yml
+```
+
+---
+
+## 9.6 Déploiement
+
+Relancer le playbook :
 
 ```bash
 docker exec ansible-controller ansible-playbook -i inventory.ini deploy_web.yml
+```
+
+Ansible va :
+
+1. Charger `group_vars/all.yml`.
+2. Récupérer la variable `mission`.
+3. Envoyer la variable au moteur de template Jinja2.
+4. Générer le fichier :
+
+```
+/var/www/html/index.html
+```
+
+---
+
+## 9.7 Vérification
+
+Depuis la machine hôte :
+
+```bash
 curl http://localhost:8080
 ```
+
+Résultat attendu :
+
+```html
+<h1>🚀 Welcome to Mars Colony</h1>
+
+<p>
+Server : mars-web
+</p>
+
+<p>
+Mission : Mars Exploration 2035
+</p>
+```
+
+La variable est maintenant gérée proprement par la configuration Ansible et non plus directement dans le playbook.
 
 **✅ Vérification** : la page affichée doit maintenant contenir `Mission : Mars Exploration 2035`.
 
