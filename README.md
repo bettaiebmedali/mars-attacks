@@ -412,7 +412,8 @@ Créez **`mission-mars/deploy_web.yml`** :
 - name: Deploy Mars web server
   hosts: mars-web
   become: yes
-
+  vars:
+    mission: "Mission Mars 2030"
   tasks:
 
   - name: Install nginx
