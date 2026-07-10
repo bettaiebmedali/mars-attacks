@@ -1037,42 +1037,9 @@ Vous devez voir les sous-dossiers `tasks/`, `handlers/`, `templates/`, `defaults
 ---
 
 ## 🏁 Mission finale 🚀
+in-progress
 
-Créez **`mission-mars/deploy_mars.yml`**, qui doit :
 
-- ✅ préparer les serveurs
-- ✅ installer les logiciels
-- ✅ créer les utilisateurs
-- ✅ installer nginx
-- ✅ déployer la page web
-- ✅ générer un environnement complet
-
-Exemple de structure attendue (à compléter avec vos rôles de la Partie 11) :
-
-```yaml
----
-- name: Deploy full Mars colony
-  hosts: mars_servers
-  become: yes
-  roles:
-    - common
-
-- name: Deploy web server
-  hosts: mars-web
-  become: yes
-  roles:
-    - nginx
-```
-
-Commande finale :
-
-```bash
-docker exec ansible-controller ansible-playbook -i inventory.ini deploy_mars.yml
-```
-
-**✅ Vérification finale** : `PLAY RECAP` sans aucun `failed`, et `curl http://localhost:8080` renvoie bien la page Mars.
-
----
 
 ## 🏆 Bonus Challenges
 
