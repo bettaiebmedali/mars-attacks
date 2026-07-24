@@ -1,0 +1,39 @@
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: scout-postgres
+    environment:
+      POSTGRES_DB: scoutdb
+      POSTGRES_USER: scout
+      POSTGRES_PASSWORD: scout
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+
+  backend:
+    build:
+      context: ./backend
+    container_name: scout-backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+
+
+  frontend:
+    image: node:22
+    container_name: scout-frontend
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "5173:5173"
+    command: npm run dev -- --host 0.0.0.0
+
+
+volumes:
+
+  postgres_data:
