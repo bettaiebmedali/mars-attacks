@@ -1,12 +1,18 @@
 from sqlalchemy import ForeignKey
 from sqlalchemy.orm import relationship
 
+from pydantic import BaseModel, EmailStr
+
+
 from sqlalchemy import Column, Integer, String, DateTime
 from datetime import datetime
 
 
 from app.db.database import Base
 
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
 
 class User(Base):
 
