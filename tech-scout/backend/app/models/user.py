@@ -46,8 +46,9 @@ class User(Base):
     )
 
     role = relationship(
-        "Role"
-    )
+    "Role",
+    back_populates="users"
+)
 
     created_at = Column(
         DateTime,

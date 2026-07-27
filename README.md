@@ -180,3 +180,40 @@ Après création d'une migration :
 git status
 git add alembic/versions
 git commit -m "database migration"
+
+
+# Modèle utilisateur
+
+## Tables actuelles
+
+### users
+
+Stocke les utilisateurs de la plateforme.
+
+Champs principaux :
+
+- id
+- first_name
+- last_name
+- email
+- password_hash
+- role_id
+- created_at
+
+
+### roles
+
+Gestion des profils utilisateurs.
+
+Rôles disponibles :
+
+| Role | Description |
+|------|-------------|
+| ADMIN | Administration plateforme |
+| MENTOR | Création et suivi des défis |
+| PARTICIPANT | Réalisation des exercices |
+
+
+Relation :
+
+roles (1) ---- (N) users
