@@ -1,18 +1,16 @@
-from sqlalchemy import ForeignKey
+from sqlalchemy import ForeignKey, Column, Integer, String, DateTime
 from sqlalchemy.orm import relationship
 
 from pydantic import BaseModel, EmailStr
-
-
-from sqlalchemy import Column, Integer, String, DateTime
 from datetime import datetime
 
-
 from app.db.database import Base
+
 
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
 
 class User(Base):
 
@@ -52,11 +50,17 @@ class User(Base):
     )
 
     role = relationship(
-    "Role",
-    back_populates="users"
-)
+        "Role",
+        back_populates="users"
+    )
 
     created_at = Column(
         DateTime,
         default=datetime.utcnow
+    )
+
+    badges = relationship(
+        "UserBadge",
+        foreign_keys="UserBadge.user_id",
+        back_populates="user"
     )
