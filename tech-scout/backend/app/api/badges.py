@@ -8,7 +8,7 @@ from app.models.user import User
 from app.models.user_badge import UserBadge
 
 from app.schemas.badge import BadgeCreate, BadgeResponse
-
+from app.schemas.user_badge import AssignBadgeRequest
 
 router = APIRouter(
     prefix="/api/badges",
@@ -72,12 +72,15 @@ def create_badge(
 def assign_badge(
     badge_id: int,
     user_id: int,
+    data: AssignBadgeRequest,
     db: Session = Depends(get_db)
 ):
+
 
     user = db.query(User)\
         .filter(User.id == user_id)\
         .first()
+
 
     if not user:
         raise HTTPException(
@@ -90,6 +93,7 @@ def assign_badge(
         .filter(Badge.id == badge_id)\
         .first()
 
+
     if not badge:
         raise HTTPException(
             404,
@@ -101,7 +105,8 @@ def assign_badge(
         .filter(
             UserBadge.user_id == user_id,
             UserBadge.badge_id == badge_id
-        ).first()
+        )\
+        .first()
 
 
     if existing:
@@ -112,17 +117,32 @@ def assign_badge(
 
 
     user_badge = UserBadge(
+
         user_id=user_id,
-        badge_id=badge_id
+
+        badge_id=badge_id,
+
+        assigned_by=data.assigned_by,
+
+        comment=data.comment
     )
 
 
     db.add(user_badge)
+
     db.commit()
+
+    db.refresh(user_badge)
 
 
     return {
-        "message":"Badge assigned",
-        "user":user.email,
-        "badge":badge.name
+
+        "message": "Badge assigned",
+
+        "user": user.email,
+
+        "badge": badge.name,
+
+        "comment": data.comment
+
     }

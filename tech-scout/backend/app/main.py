@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from app.api.badges import router as badge_router
-
+from app.db.database import SessionLocal
+from app.seeds.init_data import init_data
 from app.api.auth import router as auth_router
 from app.api.admin import router as admin_router
 
@@ -12,6 +13,16 @@ app = FastAPI(
     title="Tech Scout API",
     version="1.0"
 )
+@app.on_event("startup")
+def startup_event():
+
+    db = SessionLocal()
+
+    try:
+        init_data(db)
+
+    finally:
+        db.close()
 
 # Enregistrement des routes
 app.include_router(auth_router)
