@@ -10,6 +10,9 @@ from app.models.user_badge import UserBadge
 from app.schemas.badge import BadgeCreate, BadgeResponse
 from app.schemas.user_badge import AssignBadgeRequest
 
+from app.security.dependencies import get_current_user
+from app.security.dependencies import require_role
+
 router = APIRouter(
     prefix="/api/badges",
     tags=["Badges"]
@@ -17,19 +20,27 @@ router = APIRouter(
 
 
 # GET ALL BADGES
-@router.get("/", response_model=list[BadgeResponse])
+@router.get(
+    "/",
+    response_model=list[BadgeResponse]
+)
 def get_badges(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
 ):
     return db.query(Badge).all()
 
 
 
 # GET ONE BADGE
-@router.get("/{badge_id}", response_model=BadgeResponse)
+@router.get(
+    "/{badge_id}",
+    response_model=BadgeResponse
+)
 def get_badge(
     badge_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
 ):
 
     badge = db.query(Badge)\
@@ -46,18 +57,36 @@ def get_badge(
 
 
 
-# CREATE BADGE
-@router.post("/", response_model=BadgeResponse)
+# CREATE BADGE ADMIN ONLY
+@router.post(
+    "/",
+    response_model=BadgeResponse
+)
 def create_badge(
     badge: BadgeCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user=Depends(
+        require_role("ADMIN")
+    )
 ):
+
+    existing = db.query(Badge)\
+        .filter(Badge.name == badge.name)\
+        .first()
+
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail="Badge already exists"
+        )
+
 
     new_badge = Badge(
         name=badge.name,
         description=badge.description,
         level=badge.level
     )
+
 
     db.add(new_badge)
     db.commit()
@@ -67,13 +96,18 @@ def create_badge(
 
 
 
-# ASSIGN BADGE
-@router.post("/{badge_id}/assign/{user_id}")
+# ASSIGN BADGE ADMIN + MENTOR
+@router.post(
+    "/{badge_id}/assign/{user_id}"
+)
 def assign_badge(
     badge_id: int,
     user_id: int,
     data: AssignBadgeRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user=Depends(
+        require_role("ADMIN", "MENTOR")
+    )
 ):
 
 
@@ -84,8 +118,8 @@ def assign_badge(
 
     if not user:
         raise HTTPException(
-            404,
-            "User not found"
+            status_code=404,
+            detail="User not found"
         )
 
 
@@ -96,8 +130,8 @@ def assign_badge(
 
     if not badge:
         raise HTTPException(
-            404,
-            "Badge not found"
+            status_code=404,
+            detail="Badge not found"
         )
 
 
@@ -111,8 +145,8 @@ def assign_badge(
 
     if existing:
         raise HTTPException(
-            400,
-            "Badge already assigned"
+            status_code=400,
+            detail="Badge already assigned"
         )
 
 
@@ -122,7 +156,7 @@ def assign_badge(
 
         badge_id=badge_id,
 
-        assigned_by=data.assigned_by,
+        assigned_by=current_user.id,
 
         comment=data.comment
     )
@@ -138,6 +172,8 @@ def assign_badge(
     return {
 
         "message": "Badge assigned",
+
+        "assigned_by": current_user.email,
 
         "user": user.email,
 
