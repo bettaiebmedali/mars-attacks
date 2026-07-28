@@ -52,6 +52,8 @@ def get_pending_requests(
 
     return result
 
+
+
 @router.post("/{request_id}/approve")
 def approve_request(
 
@@ -87,6 +89,25 @@ def approve_request(
         )
 
 
+    # Vérification doublon badge
+    existing_badge = (
+        db.query(UserBadge)
+        .filter(
+            UserBadge.user_id == badge_request.user_id,
+            UserBadge.badge_id == badge_request.badge_id
+        )
+        .first()
+    )
+
+
+    if existing_badge:
+        raise HTTPException(
+            status_code=400,
+            detail="User already owns this badge"
+        )
+
+
+    # Attribution du badge
     user_badge = UserBadge(
 
         user_id=badge_request.user_id,
@@ -112,13 +133,14 @@ def approve_request(
 
     return {
 
-        "message":"Badge approved",
+        "message": "Badge approved",
 
-        "user":badge_request.user.email,
+        "user": badge_request.user.email,
 
-        "badge":badge_request.badge.name
+        "badge": badge_request.badge.name
 
     }
+
 
 @router.post("/{request_id}/reject")
 def reject_request(
