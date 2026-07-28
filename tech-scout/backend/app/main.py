@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from app.api.badges import router as badge_router
 
 from app.api.auth import router as auth_router
 from app.api.admin import router as admin_router
@@ -15,7 +16,7 @@ app = FastAPI(
 # Enregistrement des routes
 app.include_router(auth_router)
 app.include_router(admin_router)
-
+app.include_router(badge_router)
 
 @app.get("/health")
 def health():
