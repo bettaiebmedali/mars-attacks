@@ -8,6 +8,8 @@ from app.api.admin import router as admin_router
 # Import des modèles pour qu'ils soient enregistrés par SQLAlchemy
 from app.models.user import User
 from app.models.role import Role
+from app.api.badge_requests import router as badge_request_router
+
 
 app = FastAPI(
     title="Tech Scout API",
@@ -28,6 +30,9 @@ def startup_event():
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(badge_router)
+app.include_router(
+    badge_request_router
+)
 
 @app.get("/health")
 def health():
