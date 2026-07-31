@@ -1,4 +1,4 @@
-# TP08 - Tester Kubernetes RBAC avec un ServiceAccount et un Utilisateur Humain
+# TP - Tester Kubernetes RBAC avec un ServiceAccount et un Utilisateur Humain
 
 ## Objectifs
 
