@@ -20,6 +20,71 @@ router = APIRouter(
     tags=["Badge Requests"]
 )
 
+@router.get("/me")
+def get_my_requests(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+
+    requests = (
+        db.query(BadgeRequest)
+        .filter(BadgeRequest.user_id == current_user.id)
+        .order_by(BadgeRequest.requested_at.desc())
+        .all()
+    )
+
+    result = []
+
+    for request in requests:
+        result.append(
+            {
+                "id": request.id,
+                "badge_id": request.badge_id,
+                "badge": request.badge.name,
+                "badge_level": request.badge.level,
+                "status": request.status,
+                "comment": request.comment,
+                "requested_at": request.requested_at
+            }
+        )
+
+    return result
+
+
+@router.get("/")
+def get_all_requests(
+    db: Session = Depends(get_db),
+    current_user = Depends(
+        require_role("MENTOR", "ADMIN")
+    )
+):
+
+    requests = (
+        db.query(BadgeRequest)
+        .order_by(BadgeRequest.requested_at.desc())
+        .all()
+    )
+
+    result = []
+
+    for request in requests:
+        result.append(
+            {
+                "id": request.id,
+                "user": request.user.email,
+                "user_name": f"{request.user.first_name} {request.user.last_name}",
+                "badge": request.badge.name,
+                "badge_level": request.badge.level,
+                "status": request.status,
+                "comment": request.comment,
+                "requested_at": request.requested_at,
+                "validated_by": request.validator.email if request.validator else None
+            }
+        )
+
+    return result
+
+
 @router.get("/pending")
 def get_pending_requests(
     db: Session = Depends(get_db),
@@ -43,7 +108,9 @@ def get_pending_requests(
             {
                 "id": request.id,
                 "user": request.user.email,
+                "user_name": f"{request.user.first_name} {request.user.last_name}",
                 "badge": request.badge.name,
+                "badge_level": request.badge.level,
                 "status": request.status,
                 "comment": request.comment,
                 "requested_at": request.requested_at
