@@ -32,6 +32,39 @@ def get_badges(
 
 
 
+# GET BADGES EARNED BY THE CURRENT USER
+@router.get("/me/earned")
+def get_my_earned_badges(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+
+    user_badges = (
+        db.query(UserBadge)
+        .filter(UserBadge.user_id == current_user.id)
+        .order_by(UserBadge.assigned_at.desc())
+        .all()
+    )
+
+    result = []
+
+    for user_badge in user_badges:
+        result.append(
+            {
+                "id": user_badge.id,
+                "badge_id": user_badge.badge_id,
+                "name": user_badge.badge.name,
+                "description": user_badge.badge.description,
+                "level": user_badge.badge.level,
+                "comment": user_badge.comment,
+                "assigned_at": user_badge.assigned_at
+            }
+        )
+
+    return result
+
+
+
 # GET ONE BADGE
 @router.get(
     "/{badge_id}",
