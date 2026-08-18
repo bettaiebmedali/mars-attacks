@@ -1,1183 +1,1423 @@
-# 🚀 TP Ansible — Mission Mars : Déploiement automatique d'une colonie spatiale
-### (Édition GitHub Codespaces — 100% conteneurisée)
-
----
-
-## 🎯 Objectif du TP
-
-Vous êtes l'équipe DevOps de la mission Mars.
-Votre objectif est de préparer une infrastructure Linux complète en utilisant **Ansible** afin d'automatiser le déploiement d'une colonie martienne.
-
-Contrairement à la version originale, **tout se passe dans GitHub Codespaces** :
-
-- ❌ Pas de WSL
-- ❌ Pas de machine Windows
-- ✅ Un Codespace = une machine Linux dans le cloud, avec Docker déjà prêt à l'emploi
-- ✅ **Le contrôleur Ansible lui-même est un conteneur Docker**, au même titre que les serveurs Mars
-- ✅ **Toutes les images sont construites avec des `Dockerfile`** (pas d'installation manuelle paquet par paquet après coup)
-
-À la fin du TP, vous serez capables de :
-
-- écrire un `Dockerfile` et construire une image sur mesure avec `docker build`
-- créer un inventaire Ansible
-- communiquer avec des machines distantes (ici, des conteneurs) en SSH
-- écrire des playbooks YAML
-- utiliser des variables
-- utiliser les templates Jinja2
-- créer des rôles Ansible
-- automatiser un déploiement complet
-
-> 💡 **Comment utiliser ce document** : chaque étape est numérotée et contient une commande à exécuter, suivie d'un bloc **✅ Vérification** qui vous dit exactement quoi regarder pour savoir que ça a fonctionné avant de passer à la suite. Ne sautez pas les vérifications !
-
----
-
-## 🏗️ Nouvelle architecture du laboratoire
-
-Tout tourne **à l'intérieur du Codespace**, qui héberge lui-même 4 conteneurs Docker reliés par un réseau virtuel `mars-network` :
-
-```
-                 GitHub Codespace (Ubuntu, Docker déjà installé)
-                              |
-                   docker network : mars-network
-                              |
-        ------------------------------------------------
-        |              |              |                |
-  ansible-controller  mars-web      mars-db      mars-monitoring
-     (conteneur)      (conteneur)   (conteneur)     (conteneur)
-```
-
-| Conteneur | Rôle |
-|---|---|
-| `ansible-controller` | Machine de pilotage : Ansible y est installé, c'est depuis là qu'on lance les playbooks |
-| `mars-web` | Serveur web de la colonie |
-| `mars-db` | Stockage des données |
-| `mars-monitoring` | Surveillance de la base |
-
-Le dossier de travail `mission-mars/` sera créé **sur le disque du Codespace** et **monté en volume** dans `ansible-controller`. Cela veut dire que vous éditerez vos fichiers YAML confortablement dans l'éditeur VS Code du Codespace, mais qu'ils seront exécutés depuis l'intérieur du conteneur `ansible-controller`, exactement comme s'il s'agissait d'une vraie machine de contrôle séparée.
-
----
-
-## Partie 0 — Ouvrir le Codespace
-
-1. Sur GitHub, allez sur un dépôt (vous pouvez créer un dépôt vide `mission-mars`).
-2. Cliquez sur **Code** → onglet **Codespaces** → **Create codespace on main**.
-3. Attendez que l'environnement se charge (VS Code dans le navigateur).
-4. Ouvrez un terminal dans le Codespace : menu **Terminal → New Terminal**.
-
-**✅ Vérification** — Docker doit déjà être disponible par défaut dans un Codespace standard :
-
-```bash
-docker --version
-```
-
-Vous devez voir une version de Docker s'afficher. Si ce n'est pas le cas, il faut ajouter la feature `docker-in-docker` au `devcontainer.json` du dépôt (dites-le-moi si vous êtes dans ce cas, c'est réglable en 2 minutes).
-
----
-
-## Partie 1 — Préparation de l'environnement Codespace
-
-Mettre à jour le système du Codespace (pas un conteneur, ici c'est la machine hôte du Codespace) :
-
-```bash
-sudo apt update && sudo apt upgrade -y
-```
-
-**✅ Vérification** : la commande se termine sans erreur (`0 upgraded` ou une liste de paquets mis à jour, mais pas de message rouge `E:`).
-
----
-
-## Partie 2 — Construction des images Docker avec des Dockerfile
-
-Plutôt que de partir d'une image `ubuntu:24.04` nue et d'installer les paquets un par un avec `docker exec ... apt install`, on construit **deux images sur mesure** : une pour le contrôleur, une pour les serveurs Mars. C'est l'approche propre en Docker : l'image contient déjà tout ce qu'il faut, et n'importe qui peut la reconstruire à l'identique avec `docker build`.
-
-### 2.1 Créer l'arborescence du projet
-
-```bash
-mkdir -p ~/mission-mars/docker/controller
-mkdir -p ~/mission-mars/docker/server
-cd ~/mission-mars
-```
-
-### 2.2 Dockerfile du contrôleur
-
-Créez **`mission-mars/docker/controller/Dockerfile`** :
-
-```dockerfile
-FROM ubuntu:24.04
-
-# Tout ce dont le contrôleur Ansible a besoin, en une seule couche
-RUN apt update && apt install -y \
-        ansible \
-        openssh-client \
-        python3 \
-        vim \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Génère une paire de clés SSH une fois pour toutes, à la construction de l'image
-RUN mkdir -p /root/.ssh && \
-    ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa
-
-WORKDIR /mission-mars
-
-CMD ["sleep", "infinity"]
-```
-
-### 2.3 Dockerfile des serveurs Mars
-
-Créez **`mission-mars/docker/server/Dockerfile`** :
-
-```dockerfile
-FROM ubuntu:24.04
-
-# Tout ce dont un serveur Mars a besoin pour être piloté par Ansible en SSH
-RUN apt update && apt install -y \
-        openssh-server \
-        python3 \
-        sudo \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /run/sshd
-
-# La clé publique du contrôleur est copiée ici avant le build (étape 2.5)
-COPY authorized_keys /root/.ssh/authorized_keys
-RUN chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys
-
-EXPOSE 22
-
-CMD ["/usr/sbin/sshd", "-D"]
-```
-
-> 💡 Cette image contient volontairement la clé publique du contrôleur : c'est comme ça qu'Ansible pourra s'y connecter en SSH sans mot de passe, dès le premier démarrage du conteneur, sans étape manuelle supplémentaire.
-
-### 2.4 Construire l'image du contrôleur
-
-```bash
-docker build -t mars/controller:1.0 ./docker/controller
-```
-
-**✅ Vérification** :
-
-```bash
-docker images | grep mars/controller
-```
-
-### 2.5 Récupérer la clé publique du contrôleur pour l'image serveur
-
-On lance temporairement un conteneur à partir de l'image du contrôleur, le temps d'en extraire la clé publique générée à l'étape 2.2 :
-
-```bash
-docker create --name temp-controller mars/controller:1.0
-docker cp temp-controller:/root/.ssh/id_rsa.pub ./docker/server/authorized_keys
-docker rm temp-controller
-```
-
-**✅ Vérification** :
-
-```bash
-cat ./docker/server/authorized_keys
-```
-
-Vous devez voir une ligne commençant par `ssh-rsa AAAA...`.
-
-### 2.6 Construire l'image des serveurs Mars
-
-```bash
-docker build -t mars/server:1.0 ./docker/server
-```
-
-**✅ Vérification** :
-
-```bash
-docker images | grep mars/server
-```
-
-<details>
-<summary>🤔 Pourquoi deux `docker build` et pas un seul ?</summary>
-
-L'image `mars/server` a besoin de la clé publique générée **à l'intérieur** de l'image `mars/controller`. Il faut donc construire le contrôleur d'abord, en extraire la clé publique, puis seulement construire l'image serveur avec cette clé intégrée via `COPY`. C'est une bonne illustration d'une dépendance entre deux images Docker.
-
-</details>
-
----
-
-## Partie 3 — Création du réseau et lancement des conteneurs
-
-### 3.1 Créer le réseau Docker
-
-```bash
-docker network create mars-network
-```
-
-**✅ Vérification** :
-
-```bash
-docker network ls | grep mars-network
-```
-
-### 3.2 Lancer les 4 conteneurs à partir de vos images
-
-```bash
-# Le contrôleur Ansible — notez le volume monté, c'est lui qui relie
-# votre dossier VS Code au conteneur qui exécutera les commandes
-docker run -d --name ansible-controller \
-  --network mars-network \
-  -v ~/mission-mars:/mission-mars \
-  -w /mission-mars \
-  mars/controller:1.0
-
-docker run -d --name mars-web \
-  --network mars-network \
-  -p 8080:80 \
-  mars/server:1.0
-
-docker run -d --name mars-db \
-  --network mars-network \
-  mars/server:1.0
-
-docker run -d --name mars-monitoring \
-  --network mars-network \
-  mars/server:1.0
-```
-
-**✅ Vérification** :
-
-```bash
-docker ps
-```
-
-Vous devez voir **4 conteneurs** avec le statut `Up`, tous démarrés à partir de vos propres images (`mars/controller:1.0` et `mars/server:1.0`), sans aucune installation manuelle après le `docker run`.
-
----
-
-## Partie 4 — Vérification de la connexion SSH
-
-Grâce aux images construites en Partie 2, aucune installation ni copie de clé n'est nécessaire ici : tout était déjà prêt dans les images. Il ne reste qu'à vérifier que ça fonctionne.
-
-```bash
-docker exec ansible-controller ansible --version
-```
-
-**✅ Vérification** : la version d'Ansible s'affiche (ex : `ansible [core 2.16.x]`), preuve que l'image contrôleur est bien construite.
-
-Testez ensuite une connexion SSH directe depuis le contrôleur vers un serveur :
-
-```bash
-docker exec ansible-controller ssh -o StrictHostKeyChecking=no root@mars-web hostname
-```
-
-**✅ Vérification** : vous devez voir s'afficher `mars-web`, sans qu'aucun mot de passe ne soit demandé — la clé publique intégrée dans l'image `mars/server:1.0` a fait tout le travail.
-
-<details>
-<summary>😱 Ça ne marche pas ? Cliquez ici pour les causes fréquentes</summary>
-
-- Vérifiez que les 4 conteneurs sont bien `Up` (`docker ps`)
-- Vérifiez que `docker/server/authorized_keys` contient bien une clé (Partie 2.5) **avant** d'avoir construit `mars/server:1.0` — si le fichier était vide au moment du build, il faut refaire les étapes 2.5 et 2.6
-- Si vous modifiez le Dockerfile du contrôleur après coup, la clé change : il faut alors refaire les étapes 2.4 à 2.6 et relancer les conteneurs (`docker rm -f` puis `docker run`) pour que tout soit synchronisé
-
-</details>
-
----
-
-## Partie 5 — Création de l'inventaire Ansible
-
-Dans VS Code (panneau de gauche), ouvrez le dossier `mission-mars` qui a été créé à la racine de votre Codespace, et créez le fichier :
-
-**`mission-mars/inventory.ini`**
-
-```ini
-[mars_servers]
-mars-web ansible_host=mars-web ansible_user=root
-mars-db ansible_host=mars-db ansible_user=root
-mars-monitoring ansible_host=mars-monitoring ansible_user=root
-
-[mars_servers:vars]
-ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-
-```
-
-**✅ Vérification** — testez la communication Ansible :
-
-```bash
-docker exec ansible-controller ansible mars_servers -i inventory.ini -m ping
-```
-
-Les 3 serveurs doivent répondre `"ping": "pong"` en vert.
-
-<details>
-<summary>😱 Ça ne marche pas ? Cliquez ici pour les causes fréquentes</summary>
-
-- Vérifiez que les 3 conteneurs cibles sont bien `Up` (`docker ps`)
-- Vérifiez que le test SSH manuel de la Partie 4 fonctionne
-- Le nom `inventory.ini` doit être exactement celui-là, et vous devez lancer la commande depuis `/mission-mars` dans le conteneur (c'est le cas si vous utilisez `docker exec ansible-controller ...` tel quel, grâce à `-w /mission-mars` défini à la création du conteneur)
-
-</details>
-
----
-
-## Partie 6 — Premier Playbook : préparation des astronautes
-
-Créez **`mission-mars/prepare_mars.yml`** :
-
-```yaml
----
-- name: Prepare Mars infrastructure
-  hosts: mars_servers
-  become: yes
-
-  tasks:
-
-  - name: Install tools
-    apt:
-      name:
-        - vim
-        - curl
-        - htop
-        - net-tools
-      state: present
-      update_cache: yes
-```
-
-Exécution :
-
-```bash
-docker exec ansible-controller ansible-playbook -i inventory.ini prepare_mars.yml
-```
-
-**✅ Vérification** : dans le résumé final (`PLAY RECAP`), chaque serveur doit afficher `failed=0` et `unreachable=0`.
-
----
-
-## Partie 7 — Création des utilisateurs astronautes
-
-Ajoutez à la fin de **`prepare_mars.yml`**, ou créez un nouveau fichier `create_users.yml` :
-
-```yaml
----
-- name: Create astronauts
-  hosts: mars_servers
-  become: yes
-
-  tasks:
-
-  - name: Create users
-    user:
-      name: "{{ item }}"
-      state: present
-    loop:
-      - commander
-      - engineer
-      - scientist
-```
-
-Exécution :
-
-```bash
-docker exec ansible-controller ansible-playbook -i inventory.ini create_users.yml
-```
-
-**✅ Vérification** :
-
-```bash
-docker exec ansible-controller ansible mars_servers -i inventory.ini -a "id commander"
-```
-
-Les 3 serveurs doivent renvoyer un `uid` pour l'utilisateur `commander`.
-
----
-
-## Partie 8 — Déploiement du serveur Web Mars
-
-### 8.1 Créer le template Jinja2
-
-Créez le dossier et le fichier **`mission-mars/templates/index.html.j2`** :
-
-```jinja2
-<h1>🚀 Welcome to Mars Colony</h1>
-
-<p>
-Server : {{ ansible_hostname }}
-</p>
-
-<p>
-Mission : {{ mission }}
-</p>
-```
-
-### 8.2 Créer le playbook web
-
-Créez **`mission-mars/deploy_web.yml`** :
-
-```yaml
----
-- name: Deploy Mars web server
-  hosts: mars-web
-  become: yes
-  vars:
-    mission: "Mission Mars 2030"
-  tasks:
-
-  - name: Install nginx
-    apt:
-      name: nginx
-      state: present
-      update_cache: yes
-
-  - name: Deploy web page
-    template:
-      src: index.html.j2
-      dest: /var/www/html/index.html
-
-  - name: Start nginx
-    service:
-      name: nginx
-      state: started
-```
-
-Exécution :
-
-```bash
-docker exec ansible-controller ansible-playbook -i inventory.ini deploy_web.yml
-```
-
-**✅ Vérification** — depuis le terminal du Codespace (pas depuis le conteneur), le port 8080 a été publié à la création de `mars-web` :
-
-```bash
-curl http://localhost:8080
-```
-
-Vous devez voir le HTML `Welcome to Mars Colony`. Dans un vrai Codespace, vous pouvez aussi ouvrir l'onglet **Ports** de VS Code, repérer le port `8080`, et cliquer sur le globe 🌐 pour l'ouvrir dans le navigateur.
-
----
-
-# Partie 9 — Variables Ansible
+# TP — Monitoring Kubernetes avec Minikube, Prometheus et Grafana
 
 ## Objectif
 
-Dans cette partie, nous allons externaliser la variable `mission` dans un fichier `group_vars` afin de comprendre le fonctionnement des variables Ansible.
+Dans ce TP, nous allons mettre en place une solution complète de monitoring d'un cluster Kubernetes local avec **Minikube**.
+
+À la fin du TP, nous saurons :
+
+- déployer une application dans Kubernetes ;
+- installer Prometheus ;
+- installer Grafana ;
+- récupérer les métriques du cluster ;
+- visualiser les métriques dans Grafana ;
+- monitorer les Pods et les Deployments ;
+- monitorer les ressources CPU et mémoire ;
+- créer une alerte ;
+- provoquer volontairement un problème ;
+- observer le comportement du cluster et du monitoring.
 
 ---
 
-## 9.1 Suppression de la variable `mission` dans le playbook
+# 1. Architecture du TP
 
-Lors de la partie précédente, pour résoudre l'erreur :
+L'architecture finale sera la suivante :
 
-```
-AnsibleUndefinedVariable: 'mission' is undefined
-```
-
-nous avons pu ajouter temporairement une variable directement dans le playbook :
-
-```yaml
-vars:
-  mission: "Mission Mars 2030"
-```
-
-Avant de commencer cette partie, cette variable doit être supprimée.
-
-Pourquoi ?
-
-Parce que l'objectif est maintenant d'utiliser les variables globales Ansible avec `group_vars`.
-
-Si la variable reste dans le playbook :
-
-```yaml
-vars:
-  mission: "Mission Mars 2030"
-```
-
-elle sera prioritaire et Ansible utilisera cette valeur au lieu de celle définie dans :
-
-```
-group_vars/all.yml
+```text
+                         ┌──────────────────────┐
+                         │       Grafana        │
+                         │      Dashboard       │
+                         └──────────▲───────────┘
+                                    │
+                                    │ PromQL
+                                    │
+                         ┌──────────┴───────────┐
+                         │     Prometheus       │
+                         │   Collecte métriques │
+                         └───────▲──────▲───────┘
+                                 │      │
+                  ┌──────────────┘      └──────────────┐
+                  │                                    │
+        ┌─────────┴─────────┐                ┌─────────┴─────────┐
+        │ kube-state-metrics│                │   node-exporter   │
+        │ Ressources K8s    │                │ Ressources Node   │
+        └─────────▲─────────┘                └─────────▲─────────┘
+                  │                                    │
+                  └────────────────┬───────────────────┘
+                                   │
+                         ┌─────────┴─────────┐
+                         │     Minikube      │
+                         │                   │
+                         │ Application       │
+                         │ Deployment        │
+                         │ Service           │
+                         │ Pods              │
+                         └───────────────────┘
 ```
 
 ---
 
-## 9.2 Ordre de priorité des variables Ansible
+# 2. Prérequis
 
-Ansible possède un mécanisme de priorité des variables.
+Nous allons utiliser :
 
-Une même variable peut être définie à plusieurs endroits :
+- Minikube
+- kubectl
+- Docker
+- Helm
 
-- ligne de commande ;
-- playbook ;
-- inventaire ;
-- host_vars ;
-- group_vars ;
-- rôles.
-
-Lorsque plusieurs valeurs existent pour une même variable, Ansible utilise celle qui possède la priorité la plus élevée.
-
-Ordre simplifié du plus prioritaire au moins prioritaire :
-
-| Priorité | Source | Exemple |
-|---|---|---|
-| 1 | Variables extra (`-e`) | `ansible-playbook deploy.yml -e "mission=Test"` |
-| 2 | Variables définies dans le playbook | `vars:` dans `deploy_web.yml` |
-| 3 | Variables au niveau d'une tâche | `vars:` dans une task |
-| 4 | Variables d'hôte (`host_vars`) | `host_vars/mars-web.yml` |
-| 5 | Variables de groupe (`group_vars`) | `group_vars/all.yml` |
-| 6 | Variables par défaut d'un rôle | `roles/nginx/defaults/main.yml` |
-
-Exemple :
-
-Dans `deploy_web.yml` :
-
-```yaml
-vars:
-  mission: "Mission Mars 2030"
-```
-
-Dans `group_vars/all.yml` :
-
-```yaml
-mission: "Mars Exploration 2035"
-```
-
-Résultat :
-
-```
-Mission Mars 2030
-```
-
-La valeur du playbook gagne car elle possède une priorité supérieure.
-
-C'est pourquoi il faut supprimer la variable `mission` du playbook avant de continuer.
-
----
-
-## 9.3 Création du fichier `group_vars/all.yml`
-
-Créer le dossier :
+Vérifier les installations :
 
 ```bash
-mkdir group_vars
+minikube version
+kubectl version --client
+docker --version
+helm version
 ```
 
-Créer le fichier :
+Si Helm n'est pas installé :
 
 ```bash
-touch group_vars/all.yml
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 ```
 
-Structure finale :
-
-```
-mission-mars/
-├── inventory.ini
-├── deploy_web.yml
-├── templates/
-│   └── index.html.j2
-└── group_vars/
-    └── all.yml
-```
-
----
-
-## 9.4 Définition de la variable globale
-
-Modifier le fichier :
-
-```
-group_vars/all.yml
-```
-
-avec :
-
-```yaml
-mission: Mars Exploration 2035
-```
-
-Ansible charge automatiquement ce fichier.
-
-Aucun changement n'est nécessaire dans le playbook.
-
----
-
-## 9.5 Utilisation dans le template Jinja2
-
-Le fichier :
-
-```
-templates/index.html.j2
-```
-
-contient :
-
-```jinja2
-<h1>🚀 Welcome to Mars Colony</h1>
-
-<p>
-Server : {{ ansible_hostname }}
-</p>
-
-<p>
-Mission : {{ mission }}
-</p>
-```
-
-La variable :
-
-```jinja2
-{{ mission }}
-```
-
-sera remplacée automatiquement par la valeur définie dans :
-
-```
-group_vars/all.yml
-```
-
----
-
-## 9.6 Déploiement
-
-Relancer le playbook :
+Vérifier :
 
 ```bash
-docker exec ansible-controller ansible-playbook -i inventory.ini deploy_web.yml
-```
-
-Ansible va :
-
-1. Charger `group_vars/all.yml`.
-2. Récupérer la variable `mission`.
-3. Envoyer la variable au moteur de template Jinja2.
-4. Générer le fichier :
-
-```
-/var/www/html/index.html
+helm version
 ```
 
 ---
 
-## 9.7 Vérification
+# 3. Démarrer Minikube
 
-Depuis la machine hôte :
+Démarrer Minikube :
 
 ```bash
-curl http://localhost:8080
+minikube start --driver=docker
+```
+
+Vérifier le cluster :
+
+```bash
+minikube status
 ```
 
 Résultat attendu :
 
-```html
-<h1>🚀 Welcome to Mars Colony</h1>
-
-<p>
-Server : mars-web
-</p>
-
-<p>
-Mission : Mars Exploration 2035
-</p>
+```text
+host: Running
+kubelet: Running
+apiserver: Running
+kubeconfig: Configured
 ```
 
-La variable est maintenant gérée proprement par la configuration Ansible et non plus directement dans le playbook.
+Vérifier le Node :
 
-**✅ Vérification** : la page affichée doit maintenant contenir `Mission : Mars Exploration 2035`.
+```bash
+kubectl get nodes
+```
 
----
-
-# Partie 10 — Collecte des informations système avec Ansible Facts
-
-## Objectif
-
-Ansible possède un mécanisme appelé **Facts** qui permet de récupérer automatiquement des informations sur les machines cibles avant l'exécution des tâches.
-
-Ces informations sont collectées grâce au module Ansible :
+Résultat attendu :
 
 ```text
-setup
+NAME       STATUS   ROLES           AGE   VERSION
+minikube   Ready    control-plane   ...   ...
 ```
-
-Le module `setup` interroge la machine distante et retourne un ensemble d'informations système sous forme de variables appelées :
-
-```
-ansible_facts
-```
-
-Ces variables peuvent ensuite être utilisées dans les playbooks.
 
 ---
 
-# 10.1 Exécution du module setup
+# 4. Vérifier les composants Kubernetes
 
-Lancer la commande :
+Afficher tous les Pods :
 
 ```bash
-docker exec ansible-controller ansible mars_servers -i inventory.ini -m setup
+kubectl get pods -A
 ```
 
-Décomposition de la commande :
-
-| Élément | Signification |
-|---|---|
-| `docker exec ansible-controller` | Exécute la commande dans le conteneur Ansible |
-| `ansible` | Lance une commande Ansible ad-hoc |
-| `mars_servers` | Groupe de machines défini dans l'inventaire |
-| `-i inventory.ini` | Utilise cet inventaire |
-| `-m setup` | Utilise le module `setup` pour collecter les informations système |
-
----
-
-# 10.2 Exemple d'inventaire
-
-Exemple :
-
-```ini
-[mars_servers]
-mars-web
-```
-
-Le groupe :
-
-```
-mars_servers
-```
-
-indique à Ansible quelles machines doivent être interrogées.
-
----
-
-# 10.3 Fonctionnement interne
-
-Lors de l'exécution :
+Afficher les Services :
 
 ```bash
-ansible mars_servers -m setup
+kubectl get svc -A
 ```
 
-Ansible réalise plusieurs étapes :
+Afficher les Deployments :
 
-1. Connexion à la machine distante.
-2. Exécution du module Python `setup`.
-3. Collecte des informations système.
-4. Retour des résultats au contrôleur Ansible.
+```bash
+kubectl get deployments -A
+```
 
-Le résultat est retourné sous forme JSON.
+Cette étape permet de vérifier que le cluster fonctionne correctement avant d'installer le monitoring.
 
 ---
 
-# 10.4 Informations récupérées
+# 5. Créer le namespace monitoring
 
-Le module `setup` récupère plusieurs catégories d'informations.
+Nous allons isoler les composants de monitoring dans un namespace dédié.
 
-## Processeur (CPU)
-
-Exemple :
-
-```json
-"ansible_processor": [
-    "0",
-    "Genuine Intel(R) CPU"
-]
+```bash
+kubectl create namespace monitoring
 ```
 
-Permet de connaître :
+Vérifier :
 
-- le type de processeur ;
-- l'architecture ;
-- le nombre de CPU.
+```bash
+kubectl get namespaces
+```
 
-Variable principale :
+Nous aurons notamment :
 
-```yaml
-ansible_processor
+```text
+default
+kube-system
+monitoring
 ```
 
 ---
 
-## Mémoire RAM
+# 6. Installer Prometheus et Grafana avec Helm
 
-Exemple :
+Pour simplifier le TP, nous allons utiliser le projet **kube-prometheus-stack**.
 
-```json
-"ansible_memtotal_mb": 4096
+Ajouter le repository Helm :
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 ```
 
-Cette variable indique la mémoire totale disponible en Mo.
+Mettre à jour les repositories :
 
-Variable :
-
-```yaml
-ansible_memtotal_mb
+```bash
+helm repo update
 ```
 
-Exemple d'utilisation :
+Vérifier que le chart est disponible :
 
-```yaml
-- debug:
-    msg: "RAM disponible : {{ ansible_memtotal_mb }} MB"
+```bash
+helm search repo prometheus-community/kube-prometheus-stack
 ```
 
-Résultat :
+Installer la stack :
 
+```bash
+helm install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace monitoring
 ```
-RAM disponible : 4096 MB
+
+L'installation peut prendre quelques minutes.
+
+---
+
+# 7. Vérifier l'installation
+
+Afficher les Pods :
+
+```bash
+kubectl get pods -n monitoring
+```
+
+Nous devons retrouver plusieurs composants, notamment :
+
+```text
+prometheus
+grafana
+alertmanager
+kube-state-metrics
+node-exporter
+```
+
+Pour obtenir une vue plus précise :
+
+```bash
+kubectl get pods -n monitoring -o wide
 ```
 
 ---
 
-## Système d'exploitation
+# 8. Comprendre les composants
 
-Exemple :
+## Prometheus
 
-```json
-"ansible_distribution": "Ubuntu"
+Prometheus est le moteur de monitoring.
+
+Il collecte les métriques et les stocke sous forme de séries temporelles.
+
+Exemples :
+
+```text
+CPU
+Memory
+Pod status
+HTTP requests
+Container restarts
 ```
 
-Informations disponibles :
+Prometheus utilise un langage de requête appelé **PromQL**.
 
-```yaml
-ansible_distribution
-ansible_distribution_version
-ansible_os_family
-```
+---
 
-Exemple :
+## Grafana
 
-```yaml
-- debug:
-    msg: "OS : {{ ansible_distribution }} {{ ansible_distribution_version }}"
-```
+Grafana permet de visualiser les métriques.
 
-Résultat :
+Prometheus fournit les données.
 
-```
-OS : Ubuntu 22.04
+Grafana les transforme en :
+
+- graphiques ;
+- tableaux ;
+- jauges ;
+- statistiques ;
+- dashboards.
+
+---
+
+## kube-state-metrics
+
+kube-state-metrics expose des informations sur l'état des ressources Kubernetes.
+
+Par exemple :
+
+```text
+Nombre de Pods
+Nombre de replicas
+État d'un Deployment
+État d'un Pod
+État d'un Job
 ```
 
 ---
 
-## Réseau
+## node-exporter
 
-Exemple :
+node-exporter fournit des métriques concernant les machines/Nodes.
 
-```json
-"ansible_default_ipv4": {
-    "address": "172.18.0.2",
-    "interface": "eth0"
+Par exemple :
+
+```text
+CPU
+Mémoire
+Disque
+Filesystem
+Load
+```
+
+---
+
+## Alertmanager
+
+Alertmanager reçoit les alertes générées par Prometheus.
+
+Il peut ensuite les envoyer vers différents systèmes :
+
+```text
+Email
+Slack
+Teams
+Webhook
+```
+
+Dans ce TP, nous allons principalement comprendre le principe des alertes.
+
+---
+
+# 9. Vérifier les Services
+
+Exécuter :
+
+```bash
+kubectl get svc -n monitoring
+```
+
+Nous allons notamment retrouver :
+
+```text
+grafana
+prometheus
+alertmanager
+```
+
+Pour avoir davantage d'informations :
+
+```bash
+kubectl get svc -n monitoring -o wide
+```
+
+---
+
+# 10. Accéder à Grafana
+
+Nous allons utiliser `kubectl port-forward`.
+
+Identifier le Service Grafana :
+
+```bash
+kubectl get svc -n monitoring | grep grafana
+```
+
+Puis :
+
+```bash
+kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
+```
+
+Nous pouvons maintenant ouvrir :
+
+```text
+http://localhost:3000
+```
+
+---
+
+# 11. Récupérer le mot de passe Grafana
+
+Le mot de passe initial est stocké dans un Secret Kubernetes.
+
+Récupérer le Secret :
+
+```bash
+kubectl get secret -n monitoring monitoring-grafana -o yaml
+```
+
+Pour récupérer directement le mot de passe :
+
+```bash
+kubectl get secret monitoring-grafana \
+  -n monitoring \
+  -o jsonpath="{.data.admin-password}" | base64 -d
+```
+
+Le compte administrateur est généralement :
+
+```text
+Username: admin
+```
+
+Utiliser le mot de passe récupéré précédemment.
+
+---
+
+# 12. Vérifier Prometheus
+
+Dans un deuxième terminal, lancer :
+
+```bash
+kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 9090:9090
+```
+
+Puis ouvrir :
+
+```text
+http://localhost:9090
+```
+
+Nous pouvons maintenant accéder à l'interface Prometheus.
+
+---
+
+# 13. Première requête PromQL
+
+Dans Prometheus, aller dans la zone de requête.
+
+Tester :
+
+```promql
+up
+```
+
+Cette métrique permet de savoir si une cible est disponible.
+
+Une valeur :
+
+```text
+1
+```
+
+indique généralement que la cible est disponible.
+
+Une valeur :
+
+```text
+0
+```
+
+indique que la cible n'est pas disponible.
+
+---
+
+# 14. Explorer les métriques
+
+Tester :
+
+```promql
+count(up)
+```
+
+Cette requête donne le nombre de cibles surveillées.
+
+Tester également :
+
+```promql
+process_cpu_seconds_total
+```
+
+Puis :
+
+```promql
+node_memory_MemAvailable_bytes
+```
+
+et :
+
+```promql
+node_cpu_seconds_total
+```
+
+L'objectif est de se familiariser avec PromQL.
+
+---
+
+# 15. Vérifier les métriques Kubernetes
+
+Tester :
+
+```promql
+kube_pod_info
+```
+
+Cette métrique fournit des informations sur les Pods.
+
+Tester :
+
+```promql
+kube_deployment_status_replicas
+```
+
+Cette métrique permet d'observer les replicas des Deployments.
+
+Tester :
+
+```promql
+kube_pod_container_status_restarts_total
+```
+
+Cette métrique permet d'identifier les containers qui redémarrent.
+
+---
+
+# 16. Installer une application de test
+
+Nous allons créer une petite application Web.
+
+Créer un fichier :
+
+```bash
+nano app.yaml
+```
+
+Contenu :
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  labels:
+    app: demo-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app
+spec:
+  selector:
+    app: demo-app
+  ports:
+    - port: 80
+      targetPort: 80
+```
+
+Appliquer :
+
+```bash
+kubectl apply -f app.yaml
+```
+
+---
+
+# 17. Vérifier l'application
+
+```bash
+kubectl get deployment
+```
+
+Puis :
+
+```bash
+kubectl get pods
+```
+
+Nous devons avoir deux Pods :
+
+```text
+demo-app-xxxxx
+demo-app-yyyyy
+```
+
+Vérifier le Service :
+
+```bash
+kubectl get svc
+```
+
+---
+
+# 18. Accéder à l'application
+
+Avec Minikube :
+
+```bash
+minikube service demo-app --url
+```
+
+La commande retourne une URL.
+
+Tester avec :
+
+```bash
+curl <URL>
+```
+
+Nous devons recevoir la page Nginx.
+
+---
+
+# 19. Observer les Pods dans Prometheus
+
+Dans Prometheus, rechercher :
+
+```promql
+kube_pod_info
+```
+
+Puis filtrer notre application :
+
+```promql
+kube_pod_info{namespace="default"}
+```
+
+Nous pouvons également observer le nombre de Pods :
+
+```promql
+count(kube_pod_info{namespace="default"})
+```
+
+---
+
+# 20. Monitorer les replicas
+
+Nous avons configuré :
+
+```yaml
+replicas: 2
+```
+
+Nous pouvons observer :
+
+```promql
+kube_deployment_spec_replicas{deployment="demo-app"}
+```
+
+Puis :
+
+```promql
+kube_deployment_status_replicas_available{deployment="demo-app"}
+```
+
+Nous pouvons comparer :
+
+```text
+Desired replicas
+       VS
+Available replicas
+```
+
+---
+
+# 21. Monitorer les redémarrages
+
+Utiliser :
+
+```promql
+kube_pod_container_status_restarts_total
+```
+
+Pour notre application :
+
+```promql
+kube_pod_container_status_restarts_total{
+  namespace="default"
 }
 ```
 
-Informations récupérées :
-
-- adresse IP ;
-- interface réseau ;
-- passerelle ;
-- MAC address.
-
-Variables :
-
-```yaml
-ansible_default_ipv4.address
-ansible_interfaces
-```
-
-Exemple :
-
-```yaml
-- debug:
-    msg: "IP : {{ ansible_default_ipv4.address }}"
-```
+Si un container redémarre, la valeur augmente.
 
 ---
 
-## Nom de machine (hostname)
+# 22. Monitorer la mémoire
 
-Exemple :
+Une métrique intéressante est :
 
-```json
-"ansible_hostname": "mars-web"
+```promql
+container_memory_working_set_bytes
 ```
 
-Variable :
+Pour notre namespace :
 
-```yaml
-ansible_hostname
-```
-
-Utilisation dans un template :
-
-```jinja2
-Server : {{ ansible_hostname }}
-```
-
-Résultat :
-
-```
-Server : mars-web
-```
-
----
-
-# 10.5 Exemple de sortie
-
-La sortie contient une structure similaire :
-
-```json
-{
-    "ansible_facts": {
-        "ansible_hostname": "mars-web",
-        "ansible_distribution": "Ubuntu",
-        "ansible_memtotal_mb": 4096,
-        "ansible_processor": [
-            "Intel CPU"
-        ]
-    }
+```promql
+container_memory_working_set_bytes{
+  namespace="default"
 }
 ```
 
-La clé importante est :
+Nous pouvons également utiliser :
 
-```text
-ansible_facts
+```promql
+sum(container_memory_working_set_bytes{
+  namespace="default"
+})
 ```
-
-Elle contient toutes les variables collectées automatiquement.
 
 ---
 
-# 10.6 Utilisation dans un playbook
+# 23. Monitorer le CPU
 
-Les Facts sont automatiquement disponibles dans les playbooks.
+Utiliser :
+
+```promql
+rate(container_cpu_usage_seconds_total[5m])
+```
+
+Pour le namespace :
+
+```promql
+sum(
+  rate(container_cpu_usage_seconds_total{
+    namespace="default"
+  }[5m])
+)
+```
+
+Cette requête permet d'observer l'utilisation CPU des containers.
+
+---
+
+# 24. Ajouter Prometheus dans Grafana
+
+Grafana est normalement configuré avec Prometheus comme Data Source par la stack.
+
+Dans Grafana :
+
+```text
+Connections
+    ↓
+Data sources
+    ↓
+Prometheus
+```
+
+Vérifier que la connexion fonctionne.
+
+---
+
+# 25. Explorer les dashboards existants
+
+La stack fournit déjà plusieurs dashboards.
+
+Dans Grafana :
+
+```text
+Dashboards
+    ↓
+Browse
+```
+
+Explorer notamment les dashboards Kubernetes.
+
+L'objectif est de comprendre les informations disponibles avant de créer notre propre dashboard.
+
+---
+
+# 26. Créer notre propre Dashboard
+
+Créer un nouveau Dashboard :
+
+```text
+Dashboards
+    ↓
+New
+    ↓
+New Dashboard
+    ↓
+Add visualization
+```
+
+Choisir Prometheus comme Data Source.
+
+---
+
+# 27. Dashboard — Nombre de Pods
+
+Créer un panneau avec :
+
+```promql
+count(kube_pod_info)
+```
+
+Titre :
+
+```text
+Total Pods
+```
+
+Choisir une visualisation de type :
+
+```text
+Stat
+```
+
+---
+
+# 28. Dashboard — CPU
+
+Créer un panneau avec :
+
+```promql
+sum(
+  rate(container_cpu_usage_seconds_total[5m])
+)
+```
+
+Titre :
+
+```text
+CPU Usage
+```
+
+Utiliser un graphique temporel.
+
+---
+
+# 29. Dashboard — Mémoire
+
+Créer un panneau avec :
+
+```promql
+sum(
+  container_memory_working_set_bytes
+)
+```
+
+Titre :
+
+```text
+Memory Usage
+```
+
+---
+
+# 30. Dashboard — Restarts
+
+Créer un panneau avec :
+
+```promql
+sum(
+  kube_pod_container_status_restarts_total
+)
+```
+
+Titre :
+
+```text
+Container Restarts
+```
+
+---
+
+# 31. Dashboard — Replicas
+
+Créer un panneau avec :
+
+```promql
+kube_deployment_spec_replicas
+```
+
+Puis comparer avec :
+
+```promql
+kube_deployment_status_replicas_available
+```
+
+Cela permet de visualiser la différence entre :
+
+```text
+Desired
+Available
+```
+
+---
+
+# 32. Créer une situation de panne
+
+Nous allons maintenant simuler un problème.
+
+Identifier les Pods :
+
+```bash
+kubectl get pods
+```
+
+Supprimer un Pod :
+
+```bash
+kubectl delete pod <nom-du-pod>
+```
+
+Observer :
+
+```bash
+kubectl get pods -w
+```
+
+Le Deployment doit créer automatiquement un nouveau Pod.
+
+---
+
+# 33. Observer la panne avec Prometheus
+
+Pendant la suppression du Pod, observer :
+
+```promql
+kube_pod_info
+```
+
+Puis :
+
+```promql
+kube_pod_container_status_restarts_total
+```
+
+L'objectif est de comprendre que Kubernetes et le monitoring sont deux mécanismes différents :
+
+```text
+Kubernetes
+    ↓
+maintient l'état souhaité
+
+Prometheus
+    ↓
+observe l'état réel
+```
+
+---
+
+# 34. Simuler un mauvais Deployment
+
+Modifier le Deployment :
+
+```bash
+kubectl edit deployment demo-app
+```
+
+Changer volontairement l'image :
+
+```yaml
+image: nginx:does-not-exist
+```
+
+Observer :
+
+```bash
+kubectl get pods
+```
+
+Nous allons probablement obtenir :
+
+```text
+ImagePullBackOff
+```
+
+ou :
+
+```text
+ErrImagePull
+```
+
+---
+
+# 35. Diagnostiquer avec Kubernetes
+
+Exécuter :
+
+```bash
+kubectl describe pod <nom-du-pod>
+```
+
+Puis :
+
+```bash
+kubectl get events --sort-by=.lastTimestamp
+```
+
+Nous avons maintenant une chaîne de diagnostic :
+
+```text
+Grafana
+   ↓
+Prometheus
+   ↓
+Kubernetes métriques
+   ↓
+kubectl describe
+   ↓
+Kubernetes Events
+```
+
+---
+
+# 36. Restaurer l'application
+
+Remettre :
+
+```yaml
+image: nginx:alpine
+```
+
+Puis :
+
+```bash
+kubectl apply -f app.yaml
+```
+
+Vérifier :
+
+```bash
+kubectl get pods
+```
+
+Les Pods doivent revenir dans l'état :
+
+```text
+Running
+```
+
+---
+
+# 37. Comprendre les alertes
+
+Une alerte permet de passer de :
+
+```text
+Monitoring
+```
+
+à :
+
+```text
+Monitoring + Notification
+```
+
+Exemple conceptuel :
+
+```text
+CPU > 80%
+      ↓
+Prometheus
+      ↓
+Alert rule
+      ↓
+Alertmanager
+      ↓
+Notification
+```
+
+---
+
+# 38. Exemple d'alerte Prometheus
+
+Créer un fichier :
+
+```bash
+nano alert.yaml
+```
 
 Exemple :
 
 ```yaml
-- name: Display system information
-  hosts: mars_servers
-
-  tasks:
-
-  - name: Show hostname
-    debug:
-      msg: "Machine : {{ ansible_hostname }}"
-
-  - name: Show operating system
-    debug:
-      msg: "OS : {{ ansible_distribution }}"
-
-  - name: Show RAM
-    debug:
-      msg: "RAM : {{ ansible_memtotal_mb }} MB"
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: demo-alerts
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: demo.rules
+      rules:
+        - alert: PodRestartDetected
+          expr: increase(kube_pod_container_status_restarts_total[5m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Container restart detected"
+            description: "A container has restarted during the last 5 minutes."
 ```
 
-Résultat :
-
-```
-Machine : mars-web
-OS : Ubuntu
-RAM : 4096 MB
-```
-
----
-
-# 10.7 Vérification
-
-La sortie de la commande :
+Appliquer :
 
 ```bash
-docker exec ansible-controller ansible mars_servers -i inventory.ini -m setup
+kubectl apply -f alert.yaml
 ```
-
-doit contenir :
-
-```
-"ansible_facts"
-```
-
-avec notamment :
-
-```
-ansible_processor
-ansible_memtotal_mb
-ansible_distribution
-ansible_hostname
-ansible_default_ipv4
-```
-
-Les Facts permettent donc à Ansible d'adapter automatiquement les déploiements selon l'environnement réel de chaque serveur.
-
-**✅ Vérification** : la sortie JSON doit contenir une clé `"ansible_facts"` avec, entre autres, `ansible_processor`, `ansible_memtotal_mb`, `ansible_distribution`.
 
 ---
 
-## Partie 11 — Création d'un rôle Ansible
+# 39. Vérifier l'alerte
 
-Structure cible :
-
-```
-mission-mars/
-├── inventory.ini
-├── deploy_mars.yml
-└── roles/
-    ├── common/
-    ├── nginx/
-    └── monitoring/
-```
-
-Créer le rôle nginx :
+Vérifier la ressource :
 
 ```bash
-docker exec ansible-controller ansible-galaxy init roles/nginx
+kubectl get prometheusrules -n monitoring
 ```
 
-**✅ Vérification** :
+Puis vérifier Prometheus.
+
+Dans Prometheus :
+
+```text
+Alerts
+```
+
+Nous devons pouvoir retrouver :
+
+```text
+PodRestartDetected
+```
+
+---
+
+# 40. Tester l'alerte
+
+Supprimer un Pod :
 
 ```bash
-ls ~/mission-mars/roles/nginx
+kubectl delete pod <nom-du-pod>
 ```
 
-Vous devez voir les sous-dossiers `tasks/`, `handlers/`, `templates/`, `defaults/`, etc.
+Attendre la recréation du Pod.
 
-> 🎯 **À vous de jouer** : répétez la commande pour créer `roles/common` et `roles/monitoring`, puis déplacez le contenu de vos playbooks précédents (installation d'outils → `roles/common/tasks/main.yml`, installation nginx + template → `roles/nginx/tasks/main.yml`) dans la structure de rôle correspondante.
+Puis vérifier dans Prometheus si l'alerte apparaît.
 
 ---
 
-## 🏁 Mission finale 🚀
-in-progress
+# 41. Challenge final
 
+À ce stade, nous avons :
 
-
-## 🏆 Bonus Challenges
-
-### Challenge Alien Detector 👽
-
-Créez, via un playbook, le fichier `/etc/mars/alien.conf` sur tous les serveurs avec le contenu :
-
-```ini
-alien_detection=true
+```text
+Minikube
+   ↓
+Kubernetes
+   ↓
+Application
+   ↓
+Prometheus
+   ↓
+Grafana
+   ↓
+Alertmanager
 ```
 
-<details>
-<summary>💡 Indice (cliquez pour afficher)</summary>
+Le challenge consiste à construire un Dashboard contenant au minimum :
 
-Utilisez le module `file` pour créer le dossier `/etc/mars`, puis le module `copy` avec l'option `content:` pour écrire le fichier — pas besoin de template Jinja2 ici puisqu'il n'y a pas de variable.
+- nombre total de Pods ;
+- CPU ;
+- mémoire ;
+- nombre de restarts ;
+- nombre de replicas souhaités ;
+- nombre de replicas disponibles ;
+- état des Nodes.
 
-</details>
+Puis créer au moins une alerte.
 
-### Challenge Message du Commandant
+---
 
-Modifiez `/etc/motd` sur tous les serveurs pour qu'il affiche à la connexion :
+# 42. Exercices
 
+## Exercice 1
+
+Déployer l'application avec :
+
+```yaml
+replicas: 3
 ```
-🚀 Bienvenue sur Mars
-Serveur sécurisé par Ansible
-```
 
-<details>
-<summary>💡 Indice (cliquez pour afficher)</summary>
-
-Même approche que le challenge précédent : module `copy` avec `content:`, cible `/etc/motd`, sur `hosts: mars_servers`.
-
-</details>
+Vérifier dans Grafana que le nombre de Pods augmente.
 
 ---
 
-## 📝 Quiz corrigé
+## Exercice 2
 
-> Cliquez sur chaque **"Afficher la réponse"** pour révéler la correction.
+Supprimer un Pod.
 
-**Question 1 — Quel est le rôle d'Ansible Controller ?**
-
-A. Stocker les bases de données
-B. Exécuter les automatisations
-C. Remplacer Docker
-
-<details>
-<summary>Afficher la réponse</summary>
-
-**Réponse : B**
-
-</details>
-
----
-
-**Question 2 — Quel format utilise un playbook Ansible ?**
-
-A. JSON
-B. XML
-C. YAML
-
-<details>
-<summary>Afficher la réponse</summary>
-
-**Réponse : C**
-
-</details>
-
----
-
-**Question 3 — Quelle commande teste la communication Ansible ?**
-
-A. `ansible all -m ping`
-B. `docker ping`
-C. `ssh ping`
-
-<details>
-<summary>Afficher la réponse</summary>
-
-**Réponse : A**
-
-</details>
-
----
-
-**Question 4 — Quel outil permet de créer un rôle Ansible ?**
-
-A. `ansible-role-create`
-B. `ansible-galaxy init`
-C. `ansible-new-role`
-
-<details>
-<summary>Afficher la réponse</summary>
-
-**Réponse : B**
-
-</details>
-
----
-
-**Question 5 — Quel langage utilisent les templates Ansible ?**
-
-A. Python
-B. Jinja2
-C. Java
-
-<details>
-<summary>Afficher la réponse</summary>
-
-**Réponse : B**
-
-</details>
-
----
-
-**Question 6 — Pourquoi utiliser Ansible plutôt que configurer manuellement les serveurs ?**
-
-<details>
-<summary>Afficher la réponse</summary>
-
-**Réponse :** Pour automatiser, reproduire et fiabiliser les déploiements.
-
-</details>
-
----
-
-## 🧹 Nettoyage (fin de TP)
-
-Une fois le TP terminé, pour libérer les ressources du Codespace :
+Observer :
 
 ```bash
-docker rm -f ansible-controller mars-web mars-db mars-monitoring
-docker network rm mars-network
-docker rmi mars/controller:1.0 mars/server:1.0
+kubectl get pods -w
+```
+
+Puis vérifier Grafana.
+
+Question :
+
+> Pourquoi le nombre de Pods revient-il automatiquement à 3 ?
+
+---
+
+## Exercice 3
+
+Modifier volontairement l'image :
+
+```yaml
+image: nginx:does-not-exist
+```
+
+Identifier :
+
+- le problème ;
+- le message Kubernetes ;
+- l'événement correspondant ;
+- l'impact visible dans Grafana.
+
+---
+
+## Exercice 4
+
+Créer une alerte lorsque le nombre de restarts augmente.
+
+---
+
+## Exercice 5
+
+Créer un Dashboard Grafana permettant de répondre rapidement aux questions :
+
+```text
+Le cluster fonctionne-t-il ?
+Combien de Pods sont actifs ?
+Y a-t-il des Pods en erreur ?
+Les Pods redémarrent-ils ?
+Le CPU est-il élevé ?
+La mémoire est-elle élevée ?
+Les Deployments ont-ils leurs replicas disponibles ?
 ```
 
 ---
 
-## Fin du TP
+# 43. Commandes utiles
 
-🚀 **Mission réussie** : la colonie Mars est opérationnelle grâce à l'automatisation DevOps — entièrement pilotée depuis un GitHub Codespace, contrôleur Ansible compris.
+Afficher les ressources :
+
+```bash
+kubectl get all
+```
+
+Afficher les Pods :
+
+```bash
+kubectl get pods
+```
+
+Afficher les Pods en continu :
+
+```bash
+kubectl get pods -w
+```
+
+Afficher les Pods du monitoring :
+
+```bash
+kubectl get pods -n monitoring
+```
+
+Afficher les événements :
+
+```bash
+kubectl get events --sort-by=.lastTimestamp
+```
+
+Décrire une ressource :
+
+```bash
+kubectl describe pod <pod>
+```
+
+Voir les logs :
+
+```bash
+kubectl logs <pod>
+```
+
+Voir les ressources :
+
+```bash
+kubectl top nodes
+kubectl top pods
+```
+
+Si `kubectl top` ne fonctionne pas, vérifier que metrics-server est disponible :
+
+```bash
+kubectl get pods -n kube-system | grep metrics
+```
+
+---
+
+# 44. Résultat attendu
+
+À la fin du TP, nous devons disposer de :
+
+```text
+┌───────────────────────────────────────────────┐
+│                 Minikube                      │
+│                                               │
+│  ┌──────────────┐       ┌──────────────┐     │
+│  │  demo-app    │       │  demo-app    │     │
+│  │     Pod      │       │     Pod      │     │
+│  └──────────────┘       └──────────────┘     │
+│                                               │
+│  ┌─────────────────────────────────────────┐  │
+│  │             Monitoring                  │  │
+│  │                                         │  │
+│  │ Prometheus ─── Grafana                  │  │
+│  │      │                                  │  │
+│  │      ├── kube-state-metrics              │  │
+│  │      └── node-exporter                   │  │
+│  │                                         │  │
+│  │ Alertmanager                            │  │
+│  └─────────────────────────────────────────┘  │
+└───────────────────────────────────────────────┘
+```
+
+---
+
+# 45. Ce qu'il faut retenir
+
+Le monitoring Kubernetes repose sur plusieurs niveaux.
+
+### Niveau 1 — Infrastructure
+
+```text
+Node
+CPU
+Memory
+Disk
+```
+
+### Niveau 2 — Kubernetes
+
+```text
+Pods
+Deployments
+Services
+Replicas
+Restarts
+```
+
+### Niveau 3 — Application
+
+```text
+Requests
+Errors
+Latency
+Business metrics
+```
+
+### Niveau 4 — Alerting
+
+```text
+Métrique
+   ↓
+Prometheus
+   ↓
+Alert Rule
+   ↓
+Alertmanager
+   ↓
+Notification
+```
+
+L'objectif d'un système de monitoring n'est donc pas simplement de produire des graphiques.
+
+Il doit permettre de répondre rapidement à trois questions :
+
+```text
+1. Que se passe-t-il ?
+2. Pourquoi cela se passe-t-il ?
+3. Quand devons-nous intervenir ?
+```
+
+---
+
+# 46. Nettoyage du TP
+
+À la fin du TP, supprimer l'application :
+
+```bash
+kubectl delete -f app.yaml
+```
+
+Supprimer l'alerte :
+
+```bash
+kubectl delete -f alert.yaml
+```
+
+Désinstaller la stack :
+
+```bash
+helm uninstall monitoring -n monitoring
+```
+
+Supprimer le namespace :
+
+```bash
+kubectl delete namespace monitoring
+```
+
+Arrêter Minikube :
+
+```bash
+minikube stop
+```
+
+Ou supprimer complètement le cluster :
+
+```bash
+minikube delete
+```
